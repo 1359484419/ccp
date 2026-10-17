@@ -3,7 +3,7 @@
 # 每个 profile 是一个独立的 CLAUDE_CONFIG_DIR，对应一个账号，登录态/会话/设置互相隔离。
 set -euo pipefail
 
-CCP_VERSION="1.2.0"
+CCP_VERSION="1.3.0"
 REPO_RAW="${CCP_REPO_RAW:-https://raw.githubusercontent.com/1359484419/ccp/main}"
 ROOT="${CCP_HOME:-$HOME/.claude-profiles}"
 DEFAULT_DIR="$HOME/.claude"
@@ -23,6 +23,13 @@ require_profile() {
   [[ -d "$(profile_dir "$1")" ]] || die "profile '$1' 不存在，先运行：ccp add $1"
 }
 
+# 名字对应的配置目录；default 表示直接运行 claude 时用的 ~/.claude
+config_dir_of() {
+  if [[ "$1" == "default" ]]; then echo "$DEFAULT_DIR"; return; fi
+  require_profile "$1"
+  profile_dir "$1"
+}
+
 # 从 profile 的 .claude.json 读出登录邮箱；未登录输出空
 account_of() {
   local f="$1/.claude.json"
@@ -33,6 +40,7 @@ account_of() {
 cmd_add() {
   [[ $# -ge 1 ]] || die "用法：ccp add <name>"
   valid_name "$1"
+  [[ "$1" != "default" ]] || die "default 是保留名（指直接运行 claude 时的账号），请换个名字"
   local d; d="$(profile_dir "$1")"
   if [[ -d "$d" ]]; then
     echo "profile '$1' 已存在：$d"
@@ -62,10 +70,13 @@ cmd_list() {
 
 cmd_run() {
   [[ $# -ge 1 ]] || die "用法：ccp run <name> [claude 参数...]"
-  require_profile "$1"
-  local d; d="$(profile_dir "$1")"; shift
+  local name="$1" d; d="$(config_dir_of "$name")"; shift
   command -v claude >/dev/null || die "找不到 claude 命令，请先安装 Claude Code"
-  CLAUDE_CONFIG_DIR="$d" CCP_PROFILE="${d##*/}" exec claude "$@"
+  if [[ "$name" == "default" ]]; then
+    unset CLAUDE_CONFIG_DIR
+    CCP_PROFILE=default exec claude "$@"
+  fi
+  CLAUDE_CONFIG_DIR="$d" CCP_PROFILE="$name" exec claude "$@"
 }
 
 # 默认不自动打开浏览器：claude 只打印登录链接，复制到任意设备的浏览器打开，再把授权码粘贴回来。
@@ -89,7 +100,7 @@ project_key() { printf '%s' "$(pwd -P)" | sed 's/[^A-Za-z0-9]/-/g'; }
 # 把 <from> 在当前项目下最近的（或指定的）会话复制到 <to>，然后用 <to> 接着这个会话
 cmd_take() {
   [[ $# -ge 2 ]] || die "用法：ccp take <from> <to> [--session <id>] [claude 参数...]"
-  require_profile "$1"; require_profile "$2"
+  config_dir_of "$1" >/dev/null; config_dir_of "$2" >/dev/null
   [[ "$1" != "$2" ]] || die "<from> 和 <to> 不能相同"
   local from="$1" to="$2"; shift 2
   local sid=""
@@ -99,8 +110,8 @@ cmd_take() {
   fi
   local key; key="$(project_key)"
   local src_dir dst_dir
-  src_dir="$(profile_dir "$from")/projects/$key"
-  dst_dir="$(profile_dir "$to")/projects/$key"
+  src_dir="$(config_dir_of "$from")/projects/$key"
+  dst_dir="$(config_dir_of "$to")/projects/$key"
   [[ -d "$src_dir" ]] || die "'$from' 在当前目录（${PWD}）下没有会话"
   if [[ -z "$sid" ]]; then
     local latest; latest="$(ls -t "$src_dir"/*.jsonl 2>/dev/null | head -1)"
@@ -188,9 +199,10 @@ ccp - Claude Code profile 管理器（一个 profile = 一个账号）
 
   ccp add <name>              创建 profile
   ccp login <name> [参数...]  登录该 profile 的账号（只打印链接，不自动开浏览器）
-  ccp run <name> [参数...]    用该 profile 启动 claude（参数原样传给 claude）
+  ccp run <name> [参数...]    用该 profile 启动 claude（参数原样传给 claude；name 可用 default）
   ccp take <from> <to> [参数...]  把 <from> 在当前项目最近的会话复制到 <to> 并接着运行
-                              （--session <id> 指定会话；其余参数原样传给 claude）
+                              （--session <id> 指定会话；其余参数原样传给 claude；
+                               from/to 可用 default，即直接运行 claude 时的账号）
   ccp list                    列出所有 profile 及登录账号
   ccp current                 显示当前 shell 使用的 profile
   ccp env <name>              输出环境变量，用于 eval "\$(ccp env <name>)"

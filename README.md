@@ -53,6 +53,8 @@ ccp update              # 更新 ccp
 
 **跨账号接会话**：在项目目录里运行 `ccp take <from> <to>`，会把 `<from>` 在这个项目里最近的会话复制给 `<to>`，然后直接 resume。用 `--session <id>` 可以指定某个会话，其他参数会传给 claude，例如 `ccp take B A --dangerously-skip-permissions`。用的是复制，原账号的会话还在；以后反向 `ccp take A B` 切回去，也会带上最新进度。
 
+`default` 指直接运行 `claude` 时使用的账号（`~/.claude`），可以用在 `take` 和 `run` 里，例如 `ccp take default A`、`ccp take A default`、`ccp run default -c`。所以不能再新建名为 `default` 的 profile。
+
 > 一个人用自己的多个账号没有被明文禁止，但"封号后买新号继续用"属于 Usage Policy 明确禁止的绕过封禁。
 
 **macOS/Linux 下把整个 shell 切到某个 profile**（对 IDE 插件等场景有用）：

@@ -4,7 +4,7 @@
 
 $ErrorActionPreference = 'Stop'
 
-$CcpVersion = '1.2.0'
+$CcpVersion = '1.3.0'
 $RepoRaw = if ($env:CCP_REPO_RAW) { $env:CCP_REPO_RAW } else { 'https://raw.githubusercontent.com/1359484419/ccp/main' }
 $Root = if ($env:CCP_HOME) { $env:CCP_HOME } else { Join-Path $HOME '.claude-profiles' }
 $DefaultDir = Join-Path $HOME '.claude'
@@ -25,6 +25,13 @@ function Assert-Profile($name) {
     if (-not (Test-Path (Get-ProfileDir $name) -PathType Container)) { Fail "profile '$name' 不存在，先运行：ccp add $name" }
 }
 
+# 名字对应的配置目录；default 表示直接运行 claude 时用的 ~\.claude
+function Get-ConfigDir($name) {
+    if ($name -eq 'default') { return $DefaultDir }
+    Assert-Profile $name
+    return Get-ProfileDir $name
+}
+
 # 从 .claude.json 读出登录邮箱；未登录返回空
 function Get-Account($dir) {
     $f = Join-Path $dir '.claude.json'
@@ -42,9 +49,10 @@ ccp - Claude Code profile 管理器（一个 profile = 一个账号）
 
   ccp add <name>              创建 profile
   ccp login <name> [参数...]  登录该 profile 的账号（只打印链接，不自动开浏览器）
-  ccp run <name> [参数...]    用该 profile 启动 claude（参数原样传给 claude）
+  ccp run <name> [参数...]    用该 profile 启动 claude（参数原样传给 claude；name 可用 default）
   ccp take <from> <to> [参数...]  把 <from> 在当前项目最近的会话复制到 <to> 并接着运行
-                              （--session <id> 指定会话；其余参数原样传给 claude）
+                              （--session <id> 指定会话；其余参数原样传给 claude；
+                               from/to 可用 default，即直接运行 claude 时的账号）
   ccp list                    列出所有 profile 及登录账号
   ccp current                 显示当前窗口使用的 profile
   ccp share <name> [条目...]  从 ~\.claude 共享配置（默认：$($ShareItems -join ' ')）
@@ -63,6 +71,7 @@ switch ($sub) {
     'add' {
         if ($rest.Count -lt 1) { Fail '用法：ccp add <name>' }
         $name = $rest[0]; Test-Name $name
+        if ($name -eq 'default') { Fail 'default 是保留名（指直接运行 claude 时的账号），请换个名字' }
         $d = Get-ProfileDir $name
         if (Test-Path $d) { Write-Host "profile '$name' 已存在：$d" }
         else { New-Item -ItemType Directory -Force $d | Out-Null; Write-Host "已创建 profile '$name'：$d" }
@@ -82,11 +91,12 @@ switch ($sub) {
     }
     'run' {
         if ($rest.Count -lt 1) { Fail '用法：ccp run <name> [claude 参数...]' }
-        $name = $rest[0]; Assert-Profile $name
+        $name = $rest[0]; $dir = Get-ConfigDir $name
         if (-not (Get-Command claude -ErrorAction SilentlyContinue)) { Fail '找不到 claude 命令，请先安装 Claude Code' }
         $claudeArgs = @(if ($rest.Count -gt 1) { $rest[1..($rest.Count - 1)] })
         $old = $env:CLAUDE_CONFIG_DIR; $oldP = $env:CCP_PROFILE
-        $env:CLAUDE_CONFIG_DIR = Get-ProfileDir $name; $env:CCP_PROFILE = $name
+        # default 不设 CLAUDE_CONFIG_DIR，让 claude 用自己的默认目录
+        $env:CLAUDE_CONFIG_DIR = if ($name -eq 'default') { $null } else { $dir }; $env:CCP_PROFILE = $name
         # 退出后恢复，避免影响同一窗口里后续的命令
         try { & claude @claudeArgs } finally { $env:CLAUDE_CONFIG_DIR = $old; $env:CCP_PROFILE = $oldP }
     }
@@ -94,7 +104,7 @@ switch ($sub) {
         # 把 <from> 在当前项目最近的（或指定的）会话复制到 <to>，然后用 <to> 接着这个会话
         if ($rest.Count -lt 2) { Fail '用法：ccp take <from> <to> [--session <id>] [claude 参数...]' }
         $from = $rest[0]; $to = $rest[1]
-        Assert-Profile $from; Assert-Profile $to
+        $fromDir = Get-ConfigDir $from; $toDir = Get-ConfigDir $to
         if ($from -eq $to) { Fail '<from> 和 <to> 不能相同' }
         $more = @(if ($rest.Count -gt 2) { $rest[2..($rest.Count - 1)] })
         $sid = ''
@@ -105,8 +115,8 @@ switch ($sub) {
         }
         # Claude Code 按项目路径存会话：路径中字母数字以外的字符都换成 -
         $key = (Get-Location).Path -replace '[^A-Za-z0-9]', '-'
-        $srcDir = Join-Path (Get-ProfileDir $from) "projects\$key"
-        $dstDir = Join-Path (Get-ProfileDir $to) "projects\$key"
+        $srcDir = Join-Path $fromDir "projects\$key"
+        $dstDir = Join-Path $toDir "projects\$key"
         if (-not (Test-Path $srcDir)) { Fail "'$from' 在当前目录（$(Get-Location)）下没有会话" }
         if (-not $sid) {
             $latest = Get-ChildItem $srcDir -Filter *.jsonl | Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -122,7 +132,7 @@ switch ($sub) {
         if (Test-Path $side -PathType Container) { Copy-Item $side $dstDir -Recurse -Force }
         Write-Host "已把 '$from' 的会话 $sid 复制到 '$to'，正在接着运行…"
         $old = $env:CLAUDE_CONFIG_DIR; $oldP = $env:CCP_PROFILE
-        $env:CLAUDE_CONFIG_DIR = Get-ProfileDir $to; $env:CCP_PROFILE = $to
+        $env:CLAUDE_CONFIG_DIR = if ($to -eq 'default') { $null } else { $toDir }; $env:CCP_PROFILE = $to
         try { & claude --resume $sid @more } finally { $env:CLAUDE_CONFIG_DIR = $old; $env:CCP_PROFILE = $oldP }
     }
     { $_ -in 'list', 'ls' } {
