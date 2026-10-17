@@ -4,7 +4,7 @@
 
 $ErrorActionPreference = 'Stop'
 
-$CcpVersion = '1.1.0'
+$CcpVersion = '1.2.0'
 $RepoRaw = if ($env:CCP_REPO_RAW) { $env:CCP_REPO_RAW } else { 'https://raw.githubusercontent.com/1359484419/ccp/main' }
 $Root = if ($env:CCP_HOME) { $env:CCP_HOME } else { Join-Path $HOME '.claude-profiles' }
 $DefaultDir = Join-Path $HOME '.claude'
@@ -43,6 +43,8 @@ ccp - Claude Code profile 管理器（一个 profile = 一个账号）
   ccp add <name>              创建 profile
   ccp login <name> [参数...]  登录该 profile 的账号（只打印链接，不自动开浏览器）
   ccp run <name> [参数...]    用该 profile 启动 claude（参数原样传给 claude）
+  ccp take <from> <to> [参数...]  把 <from> 在当前项目最近的会话复制到 <to> 并接着运行
+                              （--session <id> 指定会话；其余参数原样传给 claude）
   ccp list                    列出所有 profile 及登录账号
   ccp current                 显示当前窗口使用的 profile
   ccp share <name> [条目...]  从 ~\.claude 共享配置（默认：$($ShareItems -join ' ')）
@@ -87,6 +89,41 @@ switch ($sub) {
         $env:CLAUDE_CONFIG_DIR = Get-ProfileDir $name; $env:CCP_PROFILE = $name
         # 退出后恢复，避免影响同一窗口里后续的命令
         try { & claude @claudeArgs } finally { $env:CLAUDE_CONFIG_DIR = $old; $env:CCP_PROFILE = $oldP }
+    }
+    'take' {
+        # 把 <from> 在当前项目最近的（或指定的）会话复制到 <to>，然后用 <to> 接着这个会话
+        if ($rest.Count -lt 2) { Fail '用法：ccp take <from> <to> [--session <id>] [claude 参数...]' }
+        $from = $rest[0]; $to = $rest[1]
+        Assert-Profile $from; Assert-Profile $to
+        if ($from -eq $to) { Fail '<from> 和 <to> 不能相同' }
+        $more = @(if ($rest.Count -gt 2) { $rest[2..($rest.Count - 1)] })
+        $sid = ''
+        if ($more.Count -ge 1 -and $more[0] -eq '--session') {
+            if ($more.Count -lt 2) { Fail '--session 后面需要会话 ID' }
+            $sid = $more[1]
+            $more = @(if ($more.Count -gt 2) { $more[2..($more.Count - 1)] })
+        }
+        # Claude Code 按项目路径存会话：路径中字母数字以外的字符都换成 -
+        $key = (Get-Location).Path -replace '[^A-Za-z0-9]', '-'
+        $srcDir = Join-Path (Get-ProfileDir $from) "projects\$key"
+        $dstDir = Join-Path (Get-ProfileDir $to) "projects\$key"
+        if (-not (Test-Path $srcDir)) { Fail "'$from' 在当前目录（$(Get-Location)）下没有会话" }
+        if (-not $sid) {
+            $latest = Get-ChildItem $srcDir -Filter *.jsonl | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if (-not $latest) { Fail "'$from' 在当前目录下没有会话" }
+            $sid = $latest.BaseName
+        }
+        $srcFile = Join-Path $srcDir "$sid.jsonl"
+        if (-not (Test-Path $srcFile)) { Fail "'$from' 在当前目录下找不到会话 $sid" }
+        New-Item -ItemType Directory -Force $dstDir | Out-Null
+        Copy-Item $srcFile $dstDir -Force
+        # 部分版本会把子代理等记录放在同名目录里，一并复制
+        $side = Join-Path $srcDir $sid
+        if (Test-Path $side -PathType Container) { Copy-Item $side $dstDir -Recurse -Force }
+        Write-Host "已把 '$from' 的会话 $sid 复制到 '$to'，正在接着运行…"
+        $old = $env:CLAUDE_CONFIG_DIR; $oldP = $env:CCP_PROFILE
+        $env:CLAUDE_CONFIG_DIR = Get-ProfileDir $to; $env:CCP_PROFILE = $to
+        try { & claude --resume $sid @more } finally { $env:CLAUDE_CONFIG_DIR = $old; $env:CCP_PROFILE = $oldP }
     }
     { $_ -in 'list', 'ls' } {
         $dirs = @(if (Test-Path $Root) { Get-ChildItem $Root -Directory })

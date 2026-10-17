@@ -3,8 +3,6 @@
 一个 profile 对应一个账号：每个 profile 是独立的 `CLAUDE_CONFIG_DIR`，登录态、会话历史和设置互相隔离。
 适用于同一个人在不同身份间切换，比如个人号和公司号、不同组织的账号。
 
-> 不包含检测到额度用完就自动换号、跨账号搬运会话这类功能。用多个账号叠加额度违反 Anthropic 条款，有封号风险。额度不够请升级 Max / Team 或开启 extra usage。
-
 ## 安装
 
 **macOS / Linux**
@@ -45,12 +43,17 @@ ccp run work            # 用 work 启动 claude
 ccp share work          # 可选：共享 ~/.claude 的 CLAUDE.md / skills / commands / agents
 ccp list                # 查看所有 profile 和对应账号
 ccp run work --resume   # claude 的参数原样透传
+ccp take B A            # 把 B 在当前项目最近的会话复制到 A，并用 A 接着跑
 ccp update              # 更新 ccp
 ```
 
 **登录方式**：`ccp login` 默认不自动打开浏览器（相当于 `BROWSER=/usr/bin/false claude auth login`；Windows 上同样处理），所以没有浏览器的 Linux 服务器也能用。终端会打印一个登录链接，复制到任意设备的浏览器打开，登录后把授权码粘贴回终端。想让它自动打开浏览器的话，先自己设置 `BROWSER`，脚本不会覆盖。
 
 同一个项目目录可以同时开两个终端，分别用 `ccp run a`、`ccp run b` 启动。如果两个会话会改同样的文件，建议先用 `git worktree` 分开工作目录。
+
+**跨账号接会话**：在项目目录里运行 `ccp take <from> <to>`，会把 `<from>` 在这个项目里最近的会话复制给 `<to>`，然后直接 resume。用 `--session <id>` 可以指定某个会话，其他参数会传给 claude，例如 `ccp take B A --dangerously-skip-permissions`。用的是复制，原账号的会话还在；以后反向 `ccp take A B` 切回去，也会带上最新进度。
+
+> 一个人用自己的多个账号没有被明文禁止，但"封号后买新号继续用"属于 Usage Policy 明确禁止的绕过封禁。
 
 **macOS/Linux 下把整个 shell 切到某个 profile**（对 IDE 插件等场景有用）：
 ```bash

@@ -3,7 +3,7 @@
 # 每个 profile 是一个独立的 CLAUDE_CONFIG_DIR，对应一个账号，登录态/会话/设置互相隔离。
 set -euo pipefail
 
-CCP_VERSION="1.1.0"
+CCP_VERSION="1.2.0"
 REPO_RAW="${CCP_REPO_RAW:-https://raw.githubusercontent.com/1359484419/ccp/main}"
 ROOT="${CCP_HOME:-$HOME/.claude-profiles}"
 DEFAULT_DIR="$HOME/.claude"
@@ -83,6 +83,39 @@ cmd_login() {
   CLAUDE_CONFIG_DIR="$d" CCP_PROFILE="${d##*/}" exec claude auth login "$@"
 }
 
+# Claude Code 按项目路径存会话：路径中字母数字以外的字符都换成 -
+project_key() { printf '%s' "$(pwd -P)" | sed 's/[^A-Za-z0-9]/-/g'; }
+
+# 把 <from> 在当前项目下最近的（或指定的）会话复制到 <to>，然后用 <to> 接着这个会话
+cmd_take() {
+  [[ $# -ge 2 ]] || die "用法：ccp take <from> <to> [--session <id>] [claude 参数...]"
+  require_profile "$1"; require_profile "$2"
+  [[ "$1" != "$2" ]] || die "<from> 和 <to> 不能相同"
+  local from="$1" to="$2"; shift 2
+  local sid=""
+  if [[ "${1:-}" == "--session" ]]; then
+    [[ -n "${2:-}" ]] || die "--session 后面需要会话 ID"
+    sid="$2"; shift 2
+  fi
+  local key; key="$(project_key)"
+  local src_dir dst_dir
+  src_dir="$(profile_dir "$from")/projects/$key"
+  dst_dir="$(profile_dir "$to")/projects/$key"
+  [[ -d "$src_dir" ]] || die "'$from' 在当前目录（${PWD}）下没有会话"
+  if [[ -z "$sid" ]]; then
+    local latest; latest="$(ls -t "$src_dir"/*.jsonl 2>/dev/null | head -1)"
+    [[ -n "$latest" ]] || die "'$from' 在当前目录下没有会话"
+    sid="$(basename "$latest" .jsonl)"
+  fi
+  [[ -f "$src_dir/$sid.jsonl" ]] || die "'$from' 在当前目录下找不到会话 $sid"
+  mkdir -p "$dst_dir"
+  cp "$src_dir/$sid.jsonl" "$dst_dir/"
+  # 部分版本会把子代理等记录放在同名目录里，一并复制
+  [[ -d "$src_dir/$sid" ]] && cp -R "$src_dir/$sid" "$dst_dir/"
+  echo "已把 '$from' 的会话 $sid 复制到 '$to'，正在接着运行…"
+  cmd_run "$to" --resume "$sid" "$@"
+}
+
 cmd_env() {
   [[ $# -ge 1 ]] || die "用法：eval \"\$(ccp env <name>)\""
   require_profile "$1"
@@ -156,6 +189,8 @@ ccp - Claude Code profile 管理器（一个 profile = 一个账号）
   ccp add <name>              创建 profile
   ccp login <name> [参数...]  登录该 profile 的账号（只打印链接，不自动开浏览器）
   ccp run <name> [参数...]    用该 profile 启动 claude（参数原样传给 claude）
+  ccp take <from> <to> [参数...]  把 <from> 在当前项目最近的会话复制到 <to> 并接着运行
+                              （--session <id> 指定会话；其余参数原样传给 claude）
   ccp list                    列出所有 profile 及登录账号
   ccp current                 显示当前 shell 使用的 profile
   ccp env <name>              输出环境变量，用于 eval "\$(ccp env <name>)"
@@ -174,6 +209,7 @@ main() {
     add) cmd_add "$@" ;;
     login) cmd_login "$@" ;;
     run) cmd_run "$@" ;;
+    take) cmd_take "$@" ;;
     list|ls) cmd_list ;;
     current) cmd_current ;;
     env) cmd_env "$@" ;;
