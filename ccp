@@ -3,6 +3,8 @@
 # 每个 profile 是一个独立的 CLAUDE_CONFIG_DIR，对应一个账号，登录态/会话/设置互相隔离。
 set -euo pipefail
 
+CCP_VERSION="1.1.0"
+REPO_RAW="${CCP_REPO_RAW:-https://raw.githubusercontent.com/1359484419/ccp/main}"
 ROOT="${CCP_HOME:-$HOME/.claude-profiles}"
 DEFAULT_DIR="$HOME/.claude"
 # share 子命令默认从 ~/.claude 软链接过来的条目（不含凭证和账号状态）
@@ -136,6 +138,17 @@ cmd_current() {
   fi
 }
 
+cmd_update() {
+  local latest
+  latest="$(curl -fsSL "$REPO_RAW/ccp" | sed -n 's/^CCP_VERSION="\(.*\)"$/\1/p' | head -1)" || die "无法连接 GitHub，请检查网络"
+  if [[ -n "$latest" && "$latest" == "$CCP_VERSION" ]]; then
+    echo "已是最新版本：$CCP_VERSION"
+    return 0
+  fi
+  echo "更新：${CCP_VERSION} -> ${latest:-最新版}"
+  curl -fsSL "$REPO_RAW/install.sh" | bash
+}
+
 usage() {
   cat <<EOF
 ccp - Claude Code profile 管理器（一个 profile = 一个账号）
@@ -148,6 +161,8 @@ ccp - Claude Code profile 管理器（一个 profile = 一个账号）
   ccp env <name>              输出环境变量，用于 eval "\$(ccp env <name>)"
   ccp share <name> [条目...]  从 ~/.claude 软链接共享配置（默认：${SHARE_ITEMS[*]}）
   ccp rm <name>               删除 profile（需确认）
+  ccp update                  更新 ccp 到最新版本
+  ccp version                 显示版本
 
 profile 存放在：${ROOT}（可用 CCP_HOME 修改）
 EOF
@@ -164,6 +179,8 @@ main() {
     env) cmd_env "$@" ;;
     share) cmd_share "$@" ;;
     rm|remove) cmd_rm "$@" ;;
+    update|upgrade) cmd_update ;;
+    version|-v|--version) echo "ccp $CCP_VERSION" ;;
     help|-h|--help) usage ;;
     *) die "未知命令：${sub}（运行 ccp help 查看用法）" ;;
   esac

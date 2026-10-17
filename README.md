@@ -24,7 +24,9 @@ irm https://raw.githubusercontent.com/1359484419/ccp/main/install.ps1 | iex
 下载或拿到本仓库的 zip 包后解压，mac/Linux 在目录中运行 `bash install.sh`，Windows 双击 `install.cmd`。
 </details>
 
-两个安装脚本都可以重复运行，**升级**时重新运行一次安装命令即可。安装内容如下：
+**升级**：运行 `ccp update` 即可。1.1.0 之前的旧版本（包括 zip 离线安装的）没有这个命令，需要再运行一次上面的安装命令，会原地覆盖，已登录的 profile 不受影响。之后就可以用 `ccp update` 了。用 `ccp version` 查看当前版本。
+
+安装脚本可以重复运行，安装内容如下：
 
 | | macOS / Linux | Windows |
 |---|---|---|
@@ -43,6 +45,7 @@ ccp run work            # 用 work 启动 claude
 ccp share work          # 可选：共享 ~/.claude 的 CLAUDE.md / skills / commands / agents
 ccp list                # 查看所有 profile 和对应账号
 ccp run work --resume   # claude 的参数原样透传
+ccp update              # 更新 ccp
 ```
 
 **登录方式**：`ccp login` 默认不自动打开浏览器（相当于 `BROWSER=/usr/bin/false claude auth login`；Windows 上同样处理），所以没有浏览器的 Linux 服务器也能用。终端会打印一个登录链接，复制到任意设备的浏览器打开，登录后把授权码粘贴回终端。想让它自动打开浏览器的话，先自己设置 `BROWSER`，脚本不会覆盖。

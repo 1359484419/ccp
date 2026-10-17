@@ -4,6 +4,8 @@
 
 $ErrorActionPreference = 'Stop'
 
+$CcpVersion = '1.1.0'
+$RepoRaw = if ($env:CCP_REPO_RAW) { $env:CCP_REPO_RAW } else { 'https://raw.githubusercontent.com/1359484419/ccp/main' }
 $Root = if ($env:CCP_HOME) { $env:CCP_HOME } else { Join-Path $HOME '.claude-profiles' }
 $DefaultDir = Join-Path $HOME '.claude'
 # share 子命令默认从 ~/.claude 共享的条目（不含凭证和账号状态）
@@ -45,6 +47,8 @@ ccp - Claude Code profile 管理器（一个 profile = 一个账号）
   ccp current                 显示当前窗口使用的 profile
   ccp share <name> [条目...]  从 ~\.claude 共享配置（默认：$($ShareItems -join ' ')）
   ccp rm <name>               删除 profile（需确认）
+  ccp update                  更新 ccp 到最新版本
+  ccp version                 显示版本
 
 profile 存放在：$Root（可用 CCP_HOME 修改）
 "@
@@ -139,6 +143,17 @@ switch ($sub) {
         Remove-Item $d -Recurse -Force
         Write-Host "已删除 $d"
     }
+    { $_ -in 'update', 'upgrade' } {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        try { $remote = (Invoke-WebRequest "$RepoRaw/ccp.ps1" -UseBasicParsing).Content }
+        catch { Fail "无法连接 GitHub，请检查网络：$_" }
+        if ($remote -is [byte[]]) { $remote = [Text.Encoding]::UTF8.GetString($remote) }
+        $latest = if ($remote -match "\`$CcpVersion = '([^']+)'") { $Matches[1] } else { '' }
+        if ($latest -and $latest -eq $CcpVersion) { Write-Host "已是最新版本：$CcpVersion"; break }
+        Write-Host "更新：$CcpVersion -> $(if ($latest) { $latest } else { '最新版' })"
+        Invoke-RestMethod "$RepoRaw/install.ps1" | Invoke-Expression
+    }
+    { $_ -in 'version', '-v', '--version' } { "ccp $CcpVersion" }
     { $_ -in 'help', '-h', '--help' } { Show-Usage }
     default { Fail "未知命令：$sub（运行 ccp help 查看用法）" }
 }
