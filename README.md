@@ -22,7 +22,7 @@ irm https://raw.githubusercontent.com/1359484419/ccp/main/install.ps1 | iex
 下载或拿到本仓库的 zip 包后解压，mac/Linux 在目录中运行 `bash install.sh`，Windows 双击 `install.cmd`。
 </details>
 
-**升级**：运行 `ccp update` 即可。1.1.0 之前的旧版本（包括 zip 离线安装的）没有这个命令，需要再运行一次上面的安装命令，会原地覆盖，已登录的 profile 不受影响。之后就可以用 `ccp update` 了。用 `ccp version` 查看当前版本。
+**升级**：运行 `ccp update` 即可。它只会升级、不会降级：远端版本更新才安装；版本相同提示"已是最新版本"；如果本地版本反而比远端新（GitHub 下载链接可能有几分钟缓存），会跳过不装。想无论如何都重装一遍，用 `ccp update --force`。1.1.0 之前的旧版本（包括 zip 离线安装的）没有这个命令，需要再运行一次上面的安装命令，会原地覆盖，已登录的 profile 不受影响。之后就可以用 `ccp update` 了。用 `ccp version` 查看当前版本。
 
 安装脚本可以重复运行，安装内容如下：
 
@@ -44,7 +44,8 @@ ccp share work          # 可选：共享 ~/.claude 的 CLAUDE.md / skills / com
 ccp list                # 查看所有 profile 和对应账号
 ccp run work --resume   # claude 的参数原样透传
 ccp take B A            # 把 B 在当前项目最近的会话复制到 A，并用 A 接着跑
-ccp update              # 更新 ccp
+ccp update              # 更新 ccp（只升不降，--force 强制重装）
+ccp login default       # 登录直接运行 claude 时用的默认账号
 ```
 
 **登录方式**：`ccp login` 默认不自动打开浏览器（相当于 `BROWSER=/usr/bin/false claude auth login`；Windows 上同样处理），所以没有浏览器的 Linux 服务器也能用。终端会打印一个登录链接，复制到任意设备的浏览器打开，登录后把授权码粘贴回终端。想让它自动打开浏览器的话，先自己设置 `BROWSER`，脚本不会覆盖。
@@ -53,13 +54,21 @@ ccp update              # 更新 ccp
 
 **跨账号接会话**：在项目目录里运行 `ccp take <from> <to>`，会把 `<from>` 在这个项目里最近的会话复制给 `<to>`，然后直接 resume。用 `--session <id>` 可以指定某个会话，其他参数会传给 claude，例如 `ccp take B A --dangerously-skip-permissions`。用的是复制，原账号的会话还在；以后反向 `ccp take A B` 切回去，也会带上最新进度。
 
-`default` 指直接运行 `claude` 时使用的账号（`~/.claude`），可以用在 `take` 和 `run` 里，例如 `ccp take default A`、`ccp take A default`、`ccp run default -c`。所以不能再新建名为 `default` 的 profile。
+`take` 会保护目标账号里已有的进度。如果 `<to>` 里已经有同一个会话：
+- 内容和 `<from>` 完全一样：不复制，直接接着跑，提示"会话已是最新"。
+- `<to>` 里的更新（说明你已经在 `<to>` 上继续聊过）：拒绝并停止，避免覆盖。确认要用 `<from>` 的版本覆盖，加 `--force`，例如 `ccp take B A --force`。
+- 其他情况（`<from>` 更新，或加了 `--force`）：先把 `<to>` 原来的会话文件备份成同目录下的 `<会话id>.jsonl.bak`（只保留最近一份），再复制。万一覆盖错了，可以从这个备份找回。
+
+`--session` 和 `--force` 写在 `<from> <to>` 后面，顺序随意；之后的参数都传给 claude。
+
+`default` 指直接运行 `claude` 时使用的账号（`~/.claude`），可以用在 `take`、`run`、`login` 里，例如 `ccp take default A`、`ccp take A default`、`ccp run default -c`、`ccp login default`。`default` 是保留名：不能新建同名 profile，`ccp rm default` 和 `ccp share default` 会被拒绝（默认账号不能删除，也不需要共享）。
 
 > 一个人用自己的多个账号没有被明文禁止，但"封号后买新号继续用"属于 Usage Policy 明确禁止的绕过封禁。
 
 **macOS/Linux 下把整个 shell 切到某个 profile**（对 IDE 插件等场景有用）：
 ```bash
 eval "$(ccp env work)"   # 之后在这个 shell 里直接运行 claude 或 code . 都会用 work
+eval "$(ccp env default)" # 切回默认的 ~/.claude 账号
 ```
 
 直接运行 `claude`（不经过 ccp）时，仍然使用默认的 `~/.claude` 账号，不受影响。
@@ -70,3 +79,15 @@ eval "$(ccp env work)"   # 之后在这个 shell 里直接运行 claude 或 code
 - `ccp login` 后面的参数会传给 `claude auth login`，例如 `--console`（用 API 计费账号）、`--sso`、`--email x@y.com`。
 - 启动的 claude 进程会带上环境变量 `CCP_PROFILE=<name>`，可以在 statusline 里显示当前 profile。
 - macOS 登录凭证存在钥匙串里，`ccp rm` 后可能需要在"钥匙串访问"里手动清理。
+
+## 注意事项
+- **登录之后不要修改 `CCP_HOME`，也不要移动 profile 目录。** macOS 钥匙串里的登录凭证条目名是 `Claude Code-credentials-` 加上配置目录路径 sha256 的前 8 位，路径一变就找不到原来的凭证，相当于没登录，需要重新 `ccp login`。
+- **来源会话还在运行时执行 `take`**，复制的只是那一刻的快照。之后两边各写各的，不会自动同步。最好先退出来源账号的 claude 再 `take`。
+- **不同 profile 的登录凭证互相独立**：在钥匙串里各存一份，登录、退出或重新登录某个 profile 不会影响其他 profile 和默认账号。
+
+## 开发者：发布新版本
+1. 改代码。
+2. 运行 `./release.sh x.y.z`（例如 `./release.sh 1.4.1`）。
+3. `git push && git push --tags`。
+
+推送后 CI 会自动运行 `scripts/check.sh` 做检查。

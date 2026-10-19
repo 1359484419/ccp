@@ -3,7 +3,7 @@
 # 每个 profile 是一个独立的 CLAUDE_CONFIG_DIR，对应一个账号，登录态/会话/设置互相隔离。
 set -euo pipefail
 
-CCP_VERSION="1.3.0"
+CCP_VERSION="1.4.0"
 REPO_RAW="${CCP_REPO_RAW:-https://raw.githubusercontent.com/1359484419/ccp/main}"
 ROOT="${CCP_HOME:-$HOME/.claude-profiles}"
 DEFAULT_DIR="$HOME/.claude"
@@ -83,31 +83,44 @@ cmd_run() {
 # 用户已设置 BROWSER 时尊重其设置。
 cmd_login() {
   [[ $# -ge 1 ]] || die "用法：ccp login <name> [claude auth login 参数...]"
-  require_profile "$1"
-  local d; d="$(profile_dir "$1")"; shift
+  local name="$1" d; d="$(config_dir_of "$name")"; shift
   command -v claude >/dev/null || die "找不到 claude 命令，请先安装 Claude Code"
   if [[ -z "${BROWSER:-}" ]]; then
     local f; for f in /usr/bin/false /bin/false; do [[ -x "$f" ]] && break; done
     export BROWSER="$f"
   fi
   echo "请复制下面打印的链接到浏览器打开，登录后把授权码粘贴回来"
-  CLAUDE_CONFIG_DIR="$d" CCP_PROFILE="${d##*/}" exec claude auth login "$@"
+  # default 不设 CLAUDE_CONFIG_DIR（外层 shell 设置过也要清掉），即登录 ~/.claude
+  if [[ "$name" == "default" ]]; then
+    unset CLAUDE_CONFIG_DIR
+    CCP_PROFILE=default exec claude auth login "$@"
+  fi
+  CLAUDE_CONFIG_DIR="$d" CCP_PROFILE="$name" exec claude auth login "$@"
 }
 
 # Claude Code 按项目路径存会话：路径中字母数字以外的字符都换成 -
 project_key() { printf '%s' "$(pwd -P)" | sed 's/[^A-Za-z0-9]/-/g'; }
 
 # 把 <from> 在当前项目下最近的（或指定的）会话复制到 <to>，然后用 <to> 接着这个会话
+# <to> 已有同名会话时：内容相同则直接接着跑；<to> 的更新则拒绝（除非 --force）；否则先备份为 .bak 再覆盖
 cmd_take() {
-  [[ $# -ge 2 ]] || die "用法：ccp take <from> <to> [--session <id>] [claude 参数...]"
+  [[ $# -ge 2 ]] || die "用法：ccp take <from> <to> [--session <id>] [--force] [claude 参数...]"
   config_dir_of "$1" >/dev/null; config_dir_of "$2" >/dev/null
   [[ "$1" != "$2" ]] || die "<from> 和 <to> 不能相同"
   local from="$1" to="$2"; shift 2
-  local sid=""
-  if [[ "${1:-}" == "--session" ]]; then
-    [[ -n "${2:-}" ]] || die "--session 后面需要会话 ID"
-    sid="$2"; shift 2
-  fi
+  local sid="" force=0
+  # 选项顺序任意；遇到第一个不认识的参数即视为 claude 参数开始
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --session)
+        [[ -n "${2:-}" ]] || die "--session 后面需要会话 ID"
+        # 会话 ID 会拼进路径，只允许字母、数字、- 和 _，防止 ../ 之类越出会话目录
+        [[ "$2" =~ ^[A-Za-z0-9_-]+$ ]] || die "会话 ID 格式不对：'$2'"
+        sid="$2"; shift 2 ;;
+      --force) force=1; shift ;;
+      *) break ;;
+    esac
+  done
   local key; key="$(project_key)"
   local src_dir dst_dir
   src_dir="$(config_dir_of "$from")/projects/$key"
@@ -119,8 +132,21 @@ cmd_take() {
     sid="$(basename "$latest" .jsonl)"
   fi
   [[ -f "$src_dir/$sid.jsonl" ]] || die "'$from' 在当前目录下找不到会话 $sid"
+  local src="$src_dir/$sid.jsonl" dst="$dst_dir/$sid.jsonl"
+  if [[ -f "$dst" ]]; then
+    if cmp -s "$src" "$dst"; then
+      echo "'$to' 里的会话 $sid 已是最新（与 '$from' 相同），无需复制，正在接着运行…"
+      cmd_run "$to" --resume "$sid" "$@"
+    fi
+    # 目标更新说明已在 <to> 上接着跑过，直接覆盖会丢进度
+    if [[ $force -eq 0 && "$dst" -nt "$src" ]]; then
+      die "'$to' 里的会话 $sid 比 '$from' 的更新（可能已在 '$to' 上继续过），为避免覆盖进度已停止；确认覆盖请加 --force"
+    fi
+    cp -p "$dst" "$dst.bak"
+    echo "'$to' 里已有会话 ${sid}，已备份到：$dst.bak"
+  fi
   mkdir -p "$dst_dir"
-  cp "$src_dir/$sid.jsonl" "$dst_dir/"
+  cp "$src" "$dst_dir/"
   # 部分版本会把子代理等记录放在同名目录里，一并复制
   [[ -d "$src_dir/$sid" ]] && cp -R "$src_dir/$sid" "$dst_dir/"
   echo "已把 '$from' 的会话 $sid 复制到 '$to'，正在接着运行…"
@@ -129,12 +155,17 @@ cmd_take() {
 
 cmd_env() {
   [[ $# -ge 1 ]] || die "用法：eval \"\$(ccp env <name>)\""
+  if [[ "$1" == "default" ]]; then
+    printf 'unset CLAUDE_CONFIG_DIR\nexport CCP_PROFILE=default\n'
+    return 0
+  fi
   require_profile "$1"
   printf 'export CLAUDE_CONFIG_DIR=%q\nexport CCP_PROFILE=%q\n' "$(profile_dir "$1")" "$1"
 }
 
 cmd_share() {
   [[ $# -ge 1 ]] || die "用法：ccp share <name> [条目...]   默认：${SHARE_ITEMS[*]}"
+  [[ "$1" != "default" ]] || die "default 是保留名（就是 ${DEFAULT_DIR} 本身），不需要共享"
   require_profile "$1"
   local d; d="$(profile_dir "$1")"; shift
   local items=("${SHARE_ITEMS[@]}")
@@ -162,10 +193,13 @@ cmd_share() {
 cmd_rm() {
   [[ $# -ge 1 ]] || die "用法：ccp rm <name>"
   valid_name "$1"
+  [[ "$1" != "default" ]] || die "default 是保留名（指直接运行 claude 时的 ${DEFAULT_DIR}），不能删除"
   local d; d="$(profile_dir "$1")"
   [[ -d "$d" ]] || { echo "profile '$1' 不存在，无需删除"; return 0; }
   local acct; acct="$(account_of "$d")"
-  read -r -p "删除 profile '$1'（${acct:-未登录}），包括其会话历史？[y/N] " ans
+  local ans=""
+  # stdin 已关闭（如脚本里调用）时 read 会失败，按"取消"处理，不能让 set -e 静默退出
+  read -r -p "删除 profile '$1'（${acct:-未登录}），包括其会话历史？[y/N] " ans || ans=""
   [[ "$ans" == [yY] ]] || { echo "已取消"; return 0; }
   # 只删目录本身；共享条目是软链接，rm -rf 不会跟随到 ~/.claude
   rm -rf "$d"
@@ -182,15 +216,37 @@ cmd_current() {
   fi
 }
 
+# 按 x.y.z 数字逐段比较版本：输出 -1 / 0 / 1（$1 小于 / 等于 / 大于 $2）
+ver_cmp() {
+  local IFS=.
+  local a=($1) b=($2) i x y
+  for i in 0 1 2; do
+    x="${a[i]:-0}"; y="${b[i]:-0}"
+    # 10# 防止 08 之类被当成八进制
+    if (( 10#$x > 10#$y )); then echo 1; return; fi
+    if (( 10#$x < 10#$y )); then echo -1; return; fi
+  done
+  echo 0
+}
+
+# 只在远端版本更高时安装，防止 GitHub 缓存导致降级；--force 无条件重装
 cmd_update() {
-  local latest
-  latest="$(curl -fsSL "$REPO_RAW/ccp" | sed -n 's/^CCP_VERSION="\(.*\)"$/\1/p' | head -1)" || die "无法连接 GitHub，请检查网络"
-  if [[ -n "$latest" && "$latest" == "$CCP_VERSION" ]]; then
-    echo "已是最新版本：$CCP_VERSION"
-    return 0
+  local force=0
+  [[ "${1:-}" == "--force" ]] && force=1
+  local remote latest
+  remote="$(curl -fsSL "$REPO_RAW/ccp")" || die "无法连接 GitHub，请检查网络"
+  latest="$(printf '%s\n' "$remote" | sed -n 's/^CCP_VERSION="\(.*\)"$/\1/p' | head -1)"
+  [[ "$latest" =~ ^[0-9]+(\.[0-9]+)*$ ]] || die "读不到远端版本号（${REPO_RAW}/ccp），已停止更新"
+  if [[ $force -eq 1 ]]; then
+    echo "强制重新安装：${CCP_VERSION} -> ${latest}"
+  else
+    case "$(ver_cmp "$latest" "$CCP_VERSION")" in
+      0) echo "已是最新版本：$CCP_VERSION"; return 0 ;;
+      -1) echo "本地版本 $CCP_VERSION 比远端 $latest 新（GitHub 下载链接可能还有几分钟缓存），已跳过"; return 0 ;;
+    esac
+    echo "更新：${CCP_VERSION} -> ${latest}"
   fi
-  echo "更新：${CCP_VERSION} -> ${latest:-最新版}"
-  curl -fsSL "$REPO_RAW/install.sh" | bash
+  curl -fsSL "$REPO_RAW/install.sh" | CCP_REPO_RAW="$REPO_RAW" bash
 }
 
 usage() {
@@ -198,17 +254,18 @@ usage() {
 ccp - Claude Code profile 管理器（一个 profile = 一个账号）
 
   ccp add <name>              创建 profile
-  ccp login <name> [参数...]  登录该 profile 的账号（只打印链接，不自动开浏览器）
+  ccp login <name> [参数...]  登录该 profile 的账号（只打印链接，不自动开浏览器；name 可用 default）
   ccp run <name> [参数...]    用该 profile 启动 claude（参数原样传给 claude；name 可用 default）
   ccp take <from> <to> [参数...]  把 <from> 在当前项目最近的会话复制到 <to> 并接着运行
-                              （--session <id> 指定会话；其余参数原样传给 claude；
+                              （--session <id> 指定会话；--force 覆盖 <to> 里更新的同名会话，
+                               覆盖前备份为 .jsonl.bak；其余参数原样传给 claude；
                                from/to 可用 default，即直接运行 claude 时的账号）
   ccp list                    列出所有 profile 及登录账号
   ccp current                 显示当前 shell 使用的 profile
-  ccp env <name>              输出环境变量，用于 eval "\$(ccp env <name>)"
+  ccp env <name>              输出环境变量，用于 eval "\$(ccp env <name>)"（name 可用 default）
   ccp share <name> [条目...]  从 ~/.claude 软链接共享配置（默认：${SHARE_ITEMS[*]}）
   ccp rm <name>               删除 profile（需确认）
-  ccp update                  更新 ccp 到最新版本
+  ccp update [--force]        更新 ccp 到最新版本（远端不比本地新时跳过；--force 强制重装）
   ccp version                 显示版本
 
 profile 存放在：${ROOT}（可用 CCP_HOME 修改）
@@ -227,7 +284,7 @@ main() {
     env) cmd_env "$@" ;;
     share) cmd_share "$@" ;;
     rm|remove) cmd_rm "$@" ;;
-    update|upgrade) cmd_update ;;
+    update|upgrade) cmd_update "$@" ;;
     version|-v|--version) echo "ccp $CCP_VERSION" ;;
     help|-h|--help) usage ;;
     *) die "未知命令：${sub}（运行 ccp help 查看用法）" ;;

@@ -1,6 +1,7 @@
-﻿﻿# ccp 安装脚本（Windows）。可重复运行：已安装则覆盖为最新版本，$PROFILE 只添加一次。
+# ccp 安装脚本（Windows）。可重复运行：已安装则覆盖为最新版本，$PROFILE 只添加一次。
 # 在线安装：irm https://raw.githubusercontent.com/1359484419/ccp/main/install.ps1 | iex
 # 本地安装：双击 install.cmd
+# 注意：本文件必须保持无 BOM。irm | iex 会把 BOM 当成命令名报错；install.cmd 用 UTF-8 显式读取本文件，所以中文不会乱码。
 # 整体包在脚本块里：通过 iex 运行时不污染用户会话的变量，出错也不会关掉用户的窗口
 & {
     $ErrorActionPreference = 'Stop'
@@ -11,8 +12,9 @@
     $dst = Join-Path $binDir 'ccp.ps1'
     $tmp = "$dst.tmp"
 
-    # 本地运行时从脚本所在目录复制；通过 irm | iex 运行时 $PSScriptRoot 为空，改为在线下载
-    $local = if ($PSScriptRoot) { Join-Path $PSScriptRoot 'ccp.ps1' } else { '' }
+    # 本地运行时从脚本所在目录复制（install.cmd 通过 CCP_SRC_DIR 传入目录）；通过 irm | iex 运行时改为在线下载
+    $srcDir = if ($env:CCP_SRC_DIR) { $env:CCP_SRC_DIR } elseif ($PSScriptRoot) { $PSScriptRoot } else { '' }
+    $local = if ($srcDir) { Join-Path $srcDir 'ccp.ps1' } else { '' }
     if ($local -and (Test-Path $local)) {
         Copy-Item $local $tmp -Force
     } else {

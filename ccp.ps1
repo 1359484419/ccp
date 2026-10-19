@@ -4,7 +4,7 @@
 
 $ErrorActionPreference = 'Stop'
 
-$CcpVersion = '1.3.0'
+$CcpVersion = '1.4.0'
 $RepoRaw = if ($env:CCP_REPO_RAW) { $env:CCP_REPO_RAW } else { 'https://raw.githubusercontent.com/1359484419/ccp/main' }
 $Root = if ($env:CCP_HOME) { $env:CCP_HOME } else { Join-Path $HOME '.claude-profiles' }
 $DefaultDir = Join-Path $HOME '.claude'
@@ -43,21 +43,40 @@ function Get-Account($dir) {
     return ''
 }
 
+# 按 x.y.z 数字逐段比较版本号：a>b 返回 1，相等返回 0，a<b 返回 -1（缺的段按 0 算）
+function Compare-Version($a, $b) {
+    $pa = @($a.Split('.')); $pb = @($b.Split('.'))
+    $n = [Math]::Max($pa.Count, $pb.Count)
+    for ($i = 0; $i -lt $n; $i++) {
+        $x = if ($i -lt $pa.Count) { [int]$pa[$i] } else { 0 }
+        $y = if ($i -lt $pb.Count) { [int]$pb[$i] } else { 0 }
+        if ($x -gt $y) { return 1 }
+        if ($x -lt $y) { return -1 }
+    }
+    return 0
+}
+
+# 两个文件内容是否完全相同（先比大小，再比哈希）
+function Test-SameContent($p1, $p2) {
+    if ((Get-Item $p1 -Force).Length -ne (Get-Item $p2 -Force).Length) { return $false }
+    return (Get-FileHash $p1 -Algorithm SHA256).Hash -eq (Get-FileHash $p2 -Algorithm SHA256).Hash
+}
+
 function Show-Usage {
     @"
 ccp - Claude Code profile 管理器（一个 profile = 一个账号）
 
   ccp add <name>              创建 profile
-  ccp login <name> [参数...]  登录该 profile 的账号（只打印链接，不自动开浏览器）
+  ccp login <name> [参数...]  登录该 profile 的账号（只打印链接，不自动开浏览器；name 可用 default）
   ccp run <name> [参数...]    用该 profile 启动 claude（参数原样传给 claude；name 可用 default）
   ccp take <from> <to> [参数...]  把 <from> 在当前项目最近的会话复制到 <to> 并接着运行
-                              （--session <id> 指定会话；其余参数原样传给 claude；
-                               from/to 可用 default，即直接运行 claude 时的账号）
+                              （--session <id> 指定会话；--force 允许覆盖 <to> 里更新的同名会话；
+                               其余参数原样传给 claude；from/to 可用 default，即直接运行 claude 时的账号）
   ccp list                    列出所有 profile 及登录账号
   ccp current                 显示当前窗口使用的 profile
   ccp share <name> [条目...]  从 ~\.claude 共享配置（默认：$($ShareItems -join ' ')）
   ccp rm <name>               删除 profile（需确认）
-  ccp update                  更新 ccp 到最新版本
+  ccp update [--force]        更新 ccp 到最新版本（--force：无论版本如何都重新安装）
   ccp version                 显示版本
 
 profile 存放在：$Root（可用 CCP_HOME 修改）
@@ -79,11 +98,12 @@ switch ($sub) {
     }
     'login' {
         if ($rest.Count -lt 1) { Fail '用法：ccp login <name> [claude auth login 参数...]' }
-        $name = $rest[0]; Assert-Profile $name
+        $name = $rest[0]; $dir = Get-ConfigDir $name
         if (-not (Get-Command claude -ErrorAction SilentlyContinue)) { Fail '找不到 claude 命令，请先安装 Claude Code' }
         $loginArgs = @(if ($rest.Count -gt 1) { $rest[1..($rest.Count - 1)] })
         $old = $env:CLAUDE_CONFIG_DIR; $oldB = $env:BROWSER
-        $env:CLAUDE_CONFIG_DIR = Get-ProfileDir $name
+        # default 不设 CLAUDE_CONFIG_DIR（外层设置了也清掉），让 claude 登录到自己的默认目录
+        $env:CLAUDE_CONFIG_DIR = if ($name -eq 'default') { $null } else { $dir }
         # 默认不自动打开浏览器：Windows 没有 false 程序，指向一个不存在的命令效果相同（启动失败即不打开）
         if (-not $env:BROWSER) { $env:BROWSER = 'false' }
         Write-Host '请复制下面打印的链接到浏览器打开，登录后把授权码粘贴回来'
@@ -102,21 +122,29 @@ switch ($sub) {
     }
     'take' {
         # 把 <from> 在当前项目最近的（或指定的）会话复制到 <to>，然后用 <to> 接着这个会话
-        if ($rest.Count -lt 2) { Fail '用法：ccp take <from> <to> [--session <id>] [claude 参数...]' }
+        if ($rest.Count -lt 2) { Fail '用法：ccp take <from> <to> [--session <id>] [--force] [claude 参数...]' }
         $from = $rest[0]; $to = $rest[1]
         $fromDir = Get-ConfigDir $from; $toDir = Get-ConfigDir $to
         if ($from -eq $to) { Fail '<from> 和 <to> 不能相同' }
         $more = @(if ($rest.Count -gt 2) { $rest[2..($rest.Count - 1)] })
-        $sid = ''
-        if ($more.Count -ge 1 -and $more[0] -eq '--session') {
-            if ($more.Count -lt 2) { Fail '--session 后面需要会话 ID' }
-            $sid = $more[1]
-            $more = @(if ($more.Count -gt 2) { $more[2..($more.Count - 1)] })
+        $sid = ''; $force = $false
+        # --session / --force 顺序任意；遇到第一个不认识的参数即视为 claude 参数开始
+        $i = 0
+        while ($i -lt $more.Count) {
+            if ($more[$i] -eq '--session') {
+                if ($i + 1 -ge $more.Count -or -not $more[$i + 1]) { Fail '--session 后面需要会话 ID' }
+                $sid = $more[$i + 1]; $i += 2
+                # 会话 ID 会拼进路径，只允许字母、数字、- 和 _，防止 ..\ 之类越出会话目录
+                if ($sid -notmatch '^[A-Za-z0-9_-]+$') { Fail "会话 ID 格式不对：'$sid'" }
+            } elseif ($more[$i] -eq '--force') {
+                $force = $true; $i += 1
+            } else { break }
         }
+        $more = @(if ($i -lt $more.Count) { $more[$i..($more.Count - 1)] })
         # Claude Code 按项目路径存会话：路径中字母数字以外的字符都换成 -
         $key = (Get-Location).Path -replace '[^A-Za-z0-9]', '-'
-        $srcDir = Join-Path $fromDir "projects\$key"
-        $dstDir = Join-Path $toDir "projects\$key"
+        $srcDir = Join-Path (Join-Path $fromDir 'projects') $key
+        $dstDir = Join-Path (Join-Path $toDir 'projects') $key
         if (-not (Test-Path $srcDir)) { Fail "'$from' 在当前目录（$(Get-Location)）下没有会话" }
         if (-not $sid) {
             $latest = Get-ChildItem $srcDir -Filter *.jsonl | Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -124,13 +152,39 @@ switch ($sub) {
             $sid = $latest.BaseName
         }
         $srcFile = Join-Path $srcDir "$sid.jsonl"
-        if (-not (Test-Path $srcFile)) { Fail "'$from' 在当前目录下找不到会话 $sid" }
-        New-Item -ItemType Directory -Force $dstDir | Out-Null
-        Copy-Item $srcFile $dstDir -Force
+        if (-not (Test-Path $srcFile -PathType Leaf)) { Fail "'$from' 在当前目录下找不到会话 $sid" }
+        $dstFile = Join-Path $dstDir "$sid.jsonl"
+        $copy = $true; $backup = ''
+        if (Test-Path $dstFile -PathType Leaf) {
+            if (Test-SameContent $srcFile $dstFile) {
+                # 内容完全相同：不用复制，直接接着运行
+                $copy = $false
+            } elseif (-not $force -and (Get-Item $dstFile -Force).LastWriteTime -gt (Get-Item $srcFile -Force).LastWriteTime) {
+                # 目标更新，说明已经在 <to> 上接着跑过，直接覆盖会丢进度
+                Fail "'$to' 里的会话 $sid 比 '$from' 的更新（可能已在 '$to' 上继续过），为避免覆盖进度已停止；确认覆盖请加 --force"
+            } else {
+                # 覆盖前先备份（同目录 <sid>.jsonl.bak，覆盖旧备份）
+                $backup = "$dstFile.bak"
+                Copy-Item $dstFile $backup -Force
+            }
+        }
+        if ($copy) {
+            New-Item -ItemType Directory -Force $dstDir | Out-Null
+            Copy-Item $srcFile $dstFile -Force
+        }
         # 部分版本会把子代理等记录放在同名目录里，一并复制
+        # （复制目录内容而不是目录本身：目标目录已存在时 Copy-Item 会嵌套成 <sid>\<sid>）
         $side = Join-Path $srcDir $sid
-        if (Test-Path $side -PathType Container) { Copy-Item $side $dstDir -Recurse -Force }
-        Write-Host "已把 '$from' 的会话 $sid 复制到 '$to'，正在接着运行…"
+        if (Test-Path $side -PathType Container) {
+            $dstSide = Join-Path $dstDir $sid
+            New-Item -ItemType Directory -Force $dstSide | Out-Null
+            Copy-Item (Join-Path $side '*') $dstSide -Recurse -Force
+        }
+        if (-not $copy) { Write-Host "'$to' 里的会话 $sid 已是最新（与 '$from' 相同），正在接着运行…" }
+        else {
+            if ($backup) { Write-Host "'$to' 里原有的会话 $sid 已备份到：$backup" }
+            Write-Host "已把 '$from' 的会话 $sid 复制到 '$to'，正在接着运行…"
+        }
         $old = $env:CLAUDE_CONFIG_DIR; $oldP = $env:CCP_PROFILE
         $env:CLAUDE_CONFIG_DIR = if ($to -eq 'default') { $null } else { $toDir }; $env:CCP_PROFILE = $to
         try { & claude --resume $sid @more } finally { $env:CLAUDE_CONFIG_DIR = $old; $env:CCP_PROFILE = $oldP }
@@ -153,7 +207,9 @@ switch ($sub) {
     }
     'share' {
         if ($rest.Count -lt 1) { Fail "用法：ccp share <name> [条目...]   默认：$($ShareItems -join ' ')" }
-        $name = $rest[0]; Assert-Profile $name
+        $name = $rest[0]
+        if ($name -eq 'default') { Fail 'default 是保留名（指直接运行 claude 时的 ~\.claude），配置本来就在那里，不需要共享' }
+        Assert-Profile $name
         $d = Get-ProfileDir $name
         $items = if ($rest.Count -gt 1) { $rest[1..($rest.Count - 1)] } else { $ShareItems }
         foreach ($it in $items) {
@@ -180,6 +236,7 @@ switch ($sub) {
     { $_ -in 'rm', 'remove' } {
         if ($rest.Count -lt 1) { Fail '用法：ccp rm <name>' }
         $name = $rest[0]; Test-Name $name
+        if ($name -eq 'default') { Fail 'default 是保留名（指直接运行 claude 时的 ~\.claude），不能删除' }
         $d = Get-ProfileDir $name
         if (-not (Test-Path $d)) { Write-Host "profile '$name' 不存在，无需删除"; break }
         $acct = Get-Account $d
@@ -191,14 +248,28 @@ switch ($sub) {
         Write-Host "已删除 $d"
     }
     { $_ -in 'update', 'upgrade' } {
+        $force = $false
+        foreach ($a in $rest) {
+            if ($a -eq '--force') { $force = $true }
+            else { Fail "未知参数：$a（用法：ccp update [--force]）" }
+        }
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         try { $remote = (Invoke-WebRequest "$RepoRaw/ccp.ps1" -UseBasicParsing).Content }
         catch { Fail "无法连接 GitHub，请检查网络：$_" }
         if ($remote -is [byte[]]) { $remote = [Text.Encoding]::UTF8.GetString($remote) }
-        $latest = if ($remote -match "\`$CcpVersion = '([^']+)'") { $Matches[1] } else { '' }
-        if ($latest -and $latest -eq $CcpVersion) { Write-Host "已是最新版本：$CcpVersion"; break }
-        Write-Host "更新：$CcpVersion -> $(if ($latest) { $latest } else { '最新版' })"
-        Invoke-RestMethod "$RepoRaw/install.ps1" | Invoke-Expression
+        # 读不到版本号就不装，避免把下载失败的页面或损坏内容当成新版
+        $latest = if ($remote -match "(?m)^\`$CcpVersion = '(\d+(\.\d+)*)'") { $Matches[1] } else { '' }
+        if (-not $latest) { Fail '无法从远端 ccp.ps1 读出版本号，已取消更新（可稍后重试，或检查 CCP_REPO_RAW）' }
+        $cmp = Compare-Version $latest $CcpVersion
+        if ($force) { Write-Host "强制重新安装：$CcpVersion -> $latest" }
+        elseif ($cmp -eq 0) { Write-Host "已是最新版本：$CcpVersion"; break }
+        elseif ($cmp -lt 0) { Write-Host "本地版本 $CcpVersion 比远端 $latest 新（GitHub 下载链接可能还有几分钟缓存），已跳过"; break }
+        else { Write-Host "更新：$CcpVersion -> $latest" }
+        try { $installer = (Invoke-WebRequest "$RepoRaw/install.ps1" -UseBasicParsing).Content }
+        catch { Fail "无法下载安装脚本，请检查网络：$_" }
+        if ($installer -is [byte[]]) { $installer = [Text.Encoding]::UTF8.GetString($installer) }
+        # 去掉开头的 BOM（U+FEFF）：Invoke-Expression 不认它，会把第一行当成命令名而报错
+        $installer.TrimStart([char]0xFEFF) | Invoke-Expression
     }
     { $_ -in 'version', '-v', '--version' } { "ccp $CcpVersion" }
     { $_ -in 'help', '-h', '--help' } { Show-Usage }

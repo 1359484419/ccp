@@ -1,0 +1,14 @@
+name: check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    # ubuntu runner 自带 shellcheck 和 pwsh，check.sh 会完整跑完所有检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 质量检查
+        run: bash scripts/check.sh
