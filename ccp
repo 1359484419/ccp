@@ -101,6 +101,36 @@ cmd_login() {
 # Claude Code 按项目路径存会话：路径中字母数字以外的字符都换成 -
 project_key() { printf '%s' "$(pwd -P)" | sed 's/[^A-Za-z0-9]/-/g'; }
 
+# 至少有一条 AI 回复才算真正的会话。只打开过 claude、或只执行过 /clear、/model 等命令也会生成会话文件，但里面没有对话
+has_reply() { grep -q '"type":"assistant"' "$1"; }
+
+# 会话标题：优先用 claude 生成的标题，没有则用最后一次输入的内容
+session_title() {
+  local t
+  t="$(grep -o '"aiTitle":"[^"]*"' "$1" | tail -1 | cut -d'"' -f4)"
+  [[ -n "$t" ]] || t="$(grep -o '"lastPrompt":"[^"]*"' "$1" | tail -1 | cut -d'"' -f4)"
+  printf '%s' "${t:0:60}"
+}
+
+session_line() {
+  printf '%s  %s  %s\n' "$(basename "$1" .jsonl)" "$(date -r "$1" '+%Y-%m-%d %H:%M')" "$(session_title "$1")"
+}
+
+# 列出 <name> 在当前项目下的会话（新的在前），空会话不列出
+cmd_sessions() {
+  [[ $# -ge 1 ]] || die "用法：ccp sessions <name>"
+  local dir f n=0 empty=0
+  dir="$(config_dir_of "$1")/projects/$(project_key)"
+  [[ -d "$dir" ]] || die "'$1' 在当前目录（${PWD}）下没有会话"
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    if has_reply "$f"; then session_line "$f"; n=$((n+1)); else empty=$((empty+1)); fi
+  done < <(ls -t "$dir"/*.jsonl 2>/dev/null)
+  [[ $n -gt 0 ]] || echo "'$1' 在当前目录下没有包含对话的会话"
+  [[ $empty -eq 0 ]] || echo "（另有 ${empty} 个没有对话内容的会话未列出）"
+  return 0
+}
+
 # 把 <from> 在当前项目下最近的（或指定的）会话复制到 <to>，然后用 <to> 接着这个会话
 # <to> 已有同名会话时：内容相同则直接接着跑；<to> 的更新则拒绝（除非 --force）；否则先备份为 .bak 再覆盖
 cmd_take() {
@@ -127,12 +157,20 @@ cmd_take() {
   dst_dir="$(config_dir_of "$to")/projects/$key"
   [[ -d "$src_dir" ]] || die "'$from' 在当前目录（${PWD}）下没有会话"
   if [[ -z "$sid" ]]; then
-    local latest; latest="$(ls -t "$src_dir"/*.jsonl 2>/dev/null | head -1)"
-    [[ -n "$latest" ]] || die "'$from' 在当前目录下没有会话"
+    # 取最近一个有对话的会话，跳过空会话（否则额度用完后再打开一次 claude，就会选中那个空会话）
+    local f latest="" skipped=0
+    while IFS= read -r f; do
+      [[ -n "$f" ]] || continue
+      if has_reply "$f"; then latest="$f"; break; fi
+      skipped=$((skipped+1))
+    done < <(ls -t "$src_dir"/*.jsonl 2>/dev/null)
+    [[ -n "$latest" ]] || die "'$from' 在当前目录下没有包含对话的会话"
     sid="$(basename "$latest" .jsonl)"
+    [[ $skipped -eq 0 ]] || echo "已跳过 ${skipped} 个更新但没有对话内容的会话"
   fi
-  [[ -f "$src_dir/$sid.jsonl" ]] || die "'$from' 在当前目录下找不到会话 $sid"
+  [[ -f "$src_dir/$sid.jsonl" ]] || die "'$from' 在当前目录下找不到会话 ${sid}（用 ccp sessions $from 查看）"
   local src="$src_dir/$sid.jsonl" dst="$dst_dir/$sid.jsonl"
+  echo "会话：$(session_line "$src")"
   if [[ -f "$dst" ]]; then
     if cmp -s "$src" "$dst"; then
       echo "'$to' 里的会话 $sid 已是最新（与 '$from' 相同），无需复制，正在接着运行…"
@@ -256,10 +294,11 @@ ccp - Claude Code profile 管理器（一个 profile = 一个账号）
   ccp add <name>              创建 profile
   ccp login <name> [参数...]  登录该 profile 的账号（只打印链接，不自动开浏览器；name 可用 default）
   ccp run <name> [参数...]    用该 profile 启动 claude（参数原样传给 claude；name 可用 default）
-  ccp take <from> <to> [参数...]  把 <from> 在当前项目最近的会话复制到 <to> 并接着运行
+  ccp take <from> <to> [参数...]  把 <from> 在当前项目最近的会话（跳过空会话）复制到 <to> 并接着运行
                               （--session <id> 指定会话；--force 覆盖 <to> 里更新的同名会话，
                                覆盖前备份为 .jsonl.bak；其余参数原样传给 claude；
                                from/to 可用 default，即直接运行 claude 时的账号）
+  ccp sessions <name>         列出该账号在当前项目的会话（ID、时间、标题），配合 take --session 使用
   ccp list                    列出所有 profile 及登录账号
   ccp current                 显示当前 shell 使用的 profile
   ccp env <name>              输出环境变量，用于 eval "\$(ccp env <name>)"（name 可用 default）
@@ -279,6 +318,7 @@ main() {
     login) cmd_login "$@" ;;
     run) cmd_run "$@" ;;
     take) cmd_take "$@" ;;
+    sessions) cmd_sessions "$@" ;;
     list|ls) cmd_list ;;
     current) cmd_current ;;
     env) cmd_env "$@" ;;

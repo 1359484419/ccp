@@ -62,6 +62,24 @@ function Test-SameContent($p1, $p2) {
     return (Get-FileHash $p1 -Algorithm SHA256).Hash -eq (Get-FileHash $p2 -Algorithm SHA256).Hash
 }
 
+# Claude Code 按项目路径存会话：路径中字母数字以外的字符都换成 -
+function Get-ProjectKey { (Get-Location).Path -replace '[^A-Za-z0-9]', '-' }
+
+# 至少有一条 AI 回复才算真正的会话。只打开过 claude、或只执行过 /clear、/model 等命令也会生成会话文件，但里面没有对话
+function Test-HasReply($file) { [bool](Select-String -LiteralPath $file -SimpleMatch '"type":"assistant"' -Quiet) }
+
+# 会话 ID、修改时间、标题（优先用 claude 生成的标题，没有则用最后一次输入的内容）
+function Get-SessionLine($file) {
+    $t = ''
+    foreach ($pat in '"aiTitle":"([^"]*)"', '"lastPrompt":"([^"]*)"') {
+        $m = Select-String -LiteralPath $file -Pattern $pat -Encoding UTF8 | Select-Object -Last 1
+        if ($m) { $t = $m.Matches[0].Groups[1].Value; break }
+    }
+    if ($t.Length -gt 60) { $t = $t.Substring(0, 60) }
+    $f = Get-Item -LiteralPath $file -Force
+    '{0}  {1}  {2}' -f $f.BaseName, $f.LastWriteTime.ToString('yyyy-MM-dd HH:mm'), $t
+}
+
 function Show-Usage {
     @"
 ccp - Claude Code profile 管理器（一个 profile = 一个账号）
@@ -69,9 +87,10 @@ ccp - Claude Code profile 管理器（一个 profile = 一个账号）
   ccp add <name>              创建 profile
   ccp login <name> [参数...]  登录该 profile 的账号（只打印链接，不自动开浏览器；name 可用 default）
   ccp run <name> [参数...]    用该 profile 启动 claude（参数原样传给 claude；name 可用 default）
-  ccp take <from> <to> [参数...]  把 <from> 在当前项目最近的会话复制到 <to> 并接着运行
+  ccp take <from> <to> [参数...]  把 <from> 在当前项目最近的会话（跳过空会话）复制到 <to> 并接着运行
                               （--session <id> 指定会话；--force 允许覆盖 <to> 里更新的同名会话；
                                其余参数原样传给 claude；from/to 可用 default，即直接运行 claude 时的账号）
+  ccp sessions <name>         列出该账号在当前项目的会话（ID、时间、标题），配合 take --session 使用
   ccp list                    列出所有 profile 及登录账号
   ccp current                 显示当前窗口使用的 profile
   ccp share <name> [条目...]  从 ~\.claude 共享配置（默认：$($ShareItems -join ' ')）
@@ -141,18 +160,24 @@ switch ($sub) {
             } else { break }
         }
         $more = @(if ($i -lt $more.Count) { $more[$i..($more.Count - 1)] })
-        # Claude Code 按项目路径存会话：路径中字母数字以外的字符都换成 -
-        $key = (Get-Location).Path -replace '[^A-Za-z0-9]', '-'
+        $key = Get-ProjectKey
         $srcDir = Join-Path (Join-Path $fromDir 'projects') $key
         $dstDir = Join-Path (Join-Path $toDir 'projects') $key
         if (-not (Test-Path $srcDir)) { Fail "'$from' 在当前目录（$(Get-Location)）下没有会话" }
         if (-not $sid) {
-            $latest = Get-ChildItem $srcDir -Filter *.jsonl | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-            if (-not $latest) { Fail "'$from' 在当前目录下没有会话" }
+            # 取最近一个有对话的会话，跳过空会话（否则额度用完后再打开一次 claude，就会选中那个空会话）
+            $latest = $null; $skipped = 0
+            foreach ($f in @(Get-ChildItem $srcDir -Filter *.jsonl | Sort-Object LastWriteTime -Descending)) {
+                if (Test-HasReply $f.FullName) { $latest = $f; break }
+                $skipped++
+            }
+            if (-not $latest) { Fail "'$from' 在当前目录下没有包含对话的会话" }
             $sid = $latest.BaseName
+            if ($skipped) { Write-Host "已跳过 $($skipped) 个更新但没有对话内容的会话" }
         }
         $srcFile = Join-Path $srcDir "$sid.jsonl"
-        if (-not (Test-Path $srcFile -PathType Leaf)) { Fail "'$from' 在当前目录下找不到会话 $sid" }
+        if (-not (Test-Path $srcFile -PathType Leaf)) { Fail "'$from' 在当前目录下找不到会话 $($sid)（用 ccp sessions $from 查看）" }
+        Write-Host "会话：$(Get-SessionLine $srcFile)"
         $dstFile = Join-Path $dstDir "$sid.jsonl"
         $copy = $true; $backup = ''
         if (Test-Path $dstFile -PathType Leaf) {
@@ -188,6 +213,19 @@ switch ($sub) {
         $old = $env:CLAUDE_CONFIG_DIR; $oldP = $env:CCP_PROFILE
         $env:CLAUDE_CONFIG_DIR = if ($to -eq 'default') { $null } else { $toDir }; $env:CCP_PROFILE = $to
         try { & claude --resume $sid @more } finally { $env:CLAUDE_CONFIG_DIR = $old; $env:CCP_PROFILE = $oldP }
+    }
+    'sessions' {
+        # 列出 <name> 在当前项目下的会话（新的在前），空会话不列出
+        if ($rest.Count -lt 1) { Fail '用法：ccp sessions <name>' }
+        $name = $rest[0]
+        $dir = Join-Path (Join-Path (Get-ConfigDir $name) 'projects') (Get-ProjectKey)
+        if (-not (Test-Path $dir)) { Fail "'$name' 在当前目录（$(Get-Location)）下没有会话" }
+        $n = 0; $empty = 0
+        foreach ($f in @(Get-ChildItem $dir -Filter *.jsonl | Sort-Object LastWriteTime -Descending)) {
+            if (Test-HasReply $f.FullName) { Get-SessionLine $f.FullName; $n++ } else { $empty++ }
+        }
+        if (-not $n) { Write-Host "'$name' 在当前目录下没有包含对话的会话" }
+        if ($empty) { Write-Host "（另有 $($empty) 个没有对话内容的会话未列出）" }
     }
     { $_ -in 'list', 'ls' } {
         $dirs = @(if (Test-Path $Root) { Get-ChildItem $Root -Directory })

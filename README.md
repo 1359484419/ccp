@@ -44,6 +44,7 @@ ccp share work          # 可选：共享 ~/.claude 的 CLAUDE.md / skills / com
 ccp list                # 查看所有 profile 和对应账号
 ccp run work --resume   # claude 的参数原样透传
 ccp take B A            # 把 B 在当前项目最近的会话复制到 A，并用 A 接着跑
+ccp sessions B          # 列出 B 在当前项目的会话（ID、时间、标题）
 ccp update              # 更新 ccp（只升不降，--force 强制重装）
 ccp login default       # 登录直接运行 claude 时用的默认账号
 ```
@@ -52,7 +53,7 @@ ccp login default       # 登录直接运行 claude 时用的默认账号
 
 同一个项目目录可以同时开两个终端，分别用 `ccp run a`、`ccp run b` 启动。如果两个会话会改同样的文件，建议先用 `git worktree` 分开工作目录。
 
-**跨账号接会话**：在项目目录里运行 `ccp take <from> <to>`，会把 `<from>` 在这个项目里最近的会话复制给 `<to>`，然后直接 resume。用 `--session <id>` 可以指定某个会话，其他参数会传给 claude，例如 `ccp take B A --dangerously-skip-permissions`。用的是复制，原账号的会话还在；以后反向 `ccp take A B` 切回去，也会带上最新进度。
+**跨账号接会话**：在项目目录里运行 `ccp take <from> <to>`，会把 `<from>` 在这个项目里最近的会话复制给 `<to>`，然后直接 resume。"最近的会话"只算有 AI 回复的会话：只打开过 claude 就退出、或只执行过 `/clear`、`/model`、`/usage` 这类命令，也会留下一个会话文件，但里面没有对话，`take` 会跳过它们（1.4.0 及之前会选中这种空会话，表现为 resume 后什么都没有）。运行时会打印选中会话的 ID、时间和标题，选得不对就用 `ccp sessions <from>` 查看列表，再用 `--session <id>` 指定。其他参数会传给 claude，例如 `ccp take B A --dangerously-skip-permissions`。用的是复制，原账号的会话还在；以后反向 `ccp take A B` 切回去，也会带上最新进度。
 
 `take` 会保护目标账号里已有的进度。如果 `<to>` 里已经有同一个会话：
 - 内容和 `<from>` 完全一样：不复制，直接接着跑，提示"会话已是最新"。

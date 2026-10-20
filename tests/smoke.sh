@@ -53,7 +53,7 @@ LOCAL_VER="$(sed -n 's/^CCP_VERSION="\(.*\)"$/\1/p' "$CCP" | head -1)"
 
 echo "== version / help =="
 r "$CCP" version;   has "version 输出" "ccp $LOCAL_VER"; rc_is "version 退出码 0" 0
-ok "版本号为 1.4.0" [ "$LOCAL_VER" == "1.4.0" ]
+ok "版本号格式为 x.y.z" [ -n "$(echo "$LOCAL_VER" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$')" ]
 r "$CCP" --version; has "--version 输出" "ccp $LOCAL_VER"
 r "$CCP" -v;        has "-v 输出" "ccp $LOCAL_VER"
 r "$CCP" help
@@ -146,8 +146,9 @@ KEY="$(cd "$PROJ" && pwd -P | sed 's/[^A-Za-z0-9]/-/g')"
 SA="$ROOT/a/projects/$KEY"; SB="$ROOT/b/projects/$KEY"
 r "$CCP" take a b;  rc_is "来源没有会话时退出 1" 1
 mkdir -p "$SA/s2"
-echo "s1-a" > "$SA/s1.jsonl"; touch -t 202001010000 "$SA/s1.jsonl"
-echo "s2-a" > "$SA/s2.jsonl"; touch -t 202001020000 "$SA/s2.jsonl"
+# 会话文件里要有 AI 回复，否则会被当成空会话跳过
+printf 's1-a\n{"type":"assistant"}\n' > "$SA/s1.jsonl"; touch -t 202001010000 "$SA/s1.jsonl"
+printf 's2-a\n{"type":"assistant"}\n' > "$SA/s2.jsonl"; touch -t 202001020000 "$SA/s2.jsonl"
 echo "sub" > "$SA/s2/sub.txt"
 r "$CCP" take a a;  rc_is "from == to 退出 1" 1
 r "$CCP" take a nope; rc_is "目标不存在退出 1" 1
@@ -225,10 +226,37 @@ r CLAUDE_CONFIG_DIR=/x "$CCP" take a default
 rc_is "take a default 退出 0" 0
 has "take 到 default 不设 CLAUDE_CONFIG_DIR" "FAKE_CFG=__UNSET__"
 ok "会话复制到 ~/.claude/projects" same "$SA/s2.jsonl" "$DK/s2.jsonl"
-mkdir -p "$DK"; echo "d1" > "$DK/d1.jsonl"; touch -t 203001010000 "$DK/d1.jsonl"
+mkdir -p "$DK"; printf 'd1\n{"type":"assistant"}\n' > "$DK/d1.jsonl"; touch -t 203001010000 "$DK/d1.jsonl"
 r "$CCP" take default b
 ok "take default b 复制 default 的最新会话" same "$DK/d1.jsonl" "$SB/d1.jsonl"
 has "take default b 用 b 运行" "FAKE_CFG=$ROOT/b"
+
+# 10. 跳过空会话（只打开过 claude 或只执行过 /clear 的会话没有 AI 回复），显示会话标题
+echo '{"type":"ai-title","aiTitle":"修复登录","sessionId":"s2"}' >> "$SA/s2.jsonl"; touch -t 202001030000 "$SA/s2.jsonl"
+echo '{"type":"last-prompt","lastPrompt":"/clear","sessionId":"e1"}' > "$SA/e1.jsonl"; touch -t 203501010000 "$SA/e1.jsonl"
+rm -rf "$ROOT/b/projects"
+r "$CCP" take a b
+rc_is "有更新的空会话时 take 退出 0" 0
+has "提示跳过了空会话" "已跳过 1 个更新但没有对话内容的会话"
+has "跳过空会话后 resume 有对话的会话" "FAKE_ARGS=--resume s2"
+ok "空会话没有被复制" [ ! -e "$SB/e1.jsonl" ]
+has "take 显示会话标题" "会话：s2  "
+has "take 显示 aiTitle" "修复登录"
+r "$CCP" take a b --session e1 --force
+rc_is "--session 可以明确指定空会话" 0; has "--session 指定空会话时照样 resume" "FAKE_ARGS=--resume e1"
+r "$CCP" sessions a
+rc_is "sessions 退出 0" 0
+has "sessions 列出有对话的会话" "s2  "
+has "sessions 显示标题" "修复登录"
+lacks "sessions 不列出空会话" "e1  "
+has "sessions 提示空会话数量" "另有 1 个没有对话内容的会话未列出"
+r "$CCP" sessions;   rc_is "sessions 缺参数退出 1" 1
+r "$CCP" sessions nope; rc_is "sessions 不存在的 profile 退出 1" 1
+"$CCP" add e >/dev/null 2>&1; mkdir -p "$ROOT/e/projects/$KEY"; cp "$SA/e1.jsonl" "$ROOT/e/projects/$KEY/"
+r "$CCP" take e b
+rc_is "只有空会话时 take 退出 1" 1
+has "只有空会话时的提示" "没有包含对话的会话"
+lacks "只有空会话时不启动 claude" "FAKE_ARGS"
 
 echo "== update [B] =="
 IFS=. read -r V1 V2 V3 <<< "$LOCAL_VER"
