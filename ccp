@@ -3,7 +3,7 @@
 # 每个 profile 是一个独立的 CLAUDE_CONFIG_DIR，对应一个账号，登录态/会话/设置互相隔离。
 set -euo pipefail
 
-CCP_VERSION="1.4.0"
+CCP_VERSION="1.4.1"
 REPO_RAW="${CCP_REPO_RAW:-https://raw.githubusercontent.com/1359484419/ccp/main}"
 ROOT="${CCP_HOME:-$HOME/.claude-profiles}"
 DEFAULT_DIR="$HOME/.claude"

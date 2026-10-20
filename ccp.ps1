@@ -4,7 +4,7 @@
 
 $ErrorActionPreference = 'Stop'
 
-$CcpVersion = '1.4.0'
+$CcpVersion = '1.4.1'
 $RepoRaw = if ($env:CCP_REPO_RAW) { $env:CCP_REPO_RAW } else { 'https://raw.githubusercontent.com/1359484419/ccp/main' }
 $Root = if ($env:CCP_HOME) { $env:CCP_HOME } else { Join-Path $HOME '.claude-profiles' }
 $DefaultDir = Join-Path $HOME '.claude'
